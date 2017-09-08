@@ -280,7 +280,7 @@ d3.csv("KMean_PCA_dengue_intrinsic_dimensionality.csv", function(error, data) {
     for (var i = 0; i < 3; i++) {
         top3KMeanFeatures[i] = features[PC1values.indexOf(sortedPC1values[i])];
     }
-    console.log(top3KMeanFeatures);
+    // console.log(top3KMeanFeatures);
 
     screeX.domain([1, data.length]);
     screeY.domain([1e-6, 1]);
@@ -423,17 +423,17 @@ d3.csv("KMean_PCA_dengue.csv", function(error, data) {
         }
         top3FeatureData.push(obj);
     }
-    console.log(column);
+    // console.log(column);
     var newColumn = column[0].map(function(col, i) { 
         return column.map(function(row) { 
             return row[i] 
         })
     });
-    console.log(newColumn);
+    // console.log(newColumn);
     for (var i in top3KMeanFeatures){
         domainByTrait[top3KMeanFeatures[i]] = d3.extent(newColumn[i]);
     }
-    console.log(domainByTrait);
+    // console.log(domainByTrait);
 
 
     // Scale the range of input data
