@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html>
+<meta charset="utf-8">
+
+<style>
+* {
+  margin: 0;
+  padding: 0;
+  font: 12px sans-serif;
+}
+
+.axis path,
+.axis line {
+  fill: none;
+  stroke: #000;
+  shape-rendering: crispEdges;
+}
+.x.axis line {
+  stroke: lightgrey;
+}
+.x.axis .minor {
+  stroke-opacity: .5;
+}
+.x.axis path {
+  display: none;
+}
+.y.axis line, .y.axis path {
+  fill: none;
+  stroke: #000;
+}
+
+.matrixaxis,
+.frame {
+  shape-rendering: crispEdges;
+}
+.cell text {
+  font-weight: bold;
+  text-transform: capitalize;
+}
+.frame {
+  fill: none;
+  stroke: #aaa;
+}
+.matrixaxis line {
+  stroke: #ddd;
+}
+.matrixaxis path {
+  display: none;
+}
+circle {
+  fill-opacity: .7;
+}
+circle.hidden {
+  fill: #ccc !important;
+}
+.extent {
+  fill: #000;
+  fill-opacity: .125;
+  stroke: #fff;
+}
+
+.tooltip, .tooltipScree{
+    padding: 3px 3px 3px 3px;
+    position: absolute;
+    pointer-events: none;
+    background-color: white;
+    opacity: 0.9;
+}
+.tooltip{
+    width: 140px;
+    height: 80px;   
+}
+.tooltipScree{
+    width: 60px;
+    height: 20px;
+    color: darkblue; 
+    font: bold 12px Georgia;
+}
+</style>
+<body>
+<script src="http://d3js.org/d3.v3.min.js"></script>
+
+<script>
+
+// Ref: http://bl.ocks.org/weiglemc/6185069
+// Example based on http://bl.ocks.org/mbostock/3887118
+// Tooltip example from http://www.d3noob.org/2013/01/adding-tooltips-to-d3js-graph.html
+// Coding style based on http://gist.github.com/mbostock/5977197
+
+var margin = {top: 20, right: 20, bottom: 30, left: 40},
+    width = 600 - margin.left - margin.right,
+    height = 400 - margin.top - margin.bottom;
+
+var xValue = function(d) { return d.x; },
+    xScale = d3.scale.linear().range([0, width]),
+    xAxis = d3.svg.axis().scale(xScale).orient("bottom"),
+    yValue = function(d) { return d.y; },
+    yScale = d3.scale.linear().range([height, 0]),
+    yAxis = d3.svg.axis().scale(yScale).orient("left"),
+    cValue = function(d) { return d.group; },
+    color = d3.scale.category10();
+
+var screeX = d3.scale.linear().range([0, 0.58 * width]),
+    screeY = d3.scale.linear().range([0.58 * height, 0]),
+    line = d3.svg.line()
+        .x(function(d,i) { return screeX(i+1); })
+        .y(function(d) { return screeY(d); });
+
+// The table generation function
+var tabulate = function(data, columns, table) {
+    table.append("thead").append("tr")
+        .selectAll("th")
+        .data(columns)
+        .enter()
+        .append("th")
+        .text(function(column) { return column; });
+
+    var rows = table.append("tbody").selectAll("tr").data(data).enter().append("tr");
+        
+    var cells = rows.selectAll("td")
+        .data(function(row) {
+            return columns.map(function(column) {
+                return {column: column, value: row[column]};
+            });
+        })
+        .enter()
+        .append("td")
+        .attr("style", "font-family: Courier")
+        .html(function(d) { return d.value; })
+        .on("mouseover", function(d) {
+            d3.select(this).attr("style", "outline: thin solid red; font: bold 12px Courier; color: red")
+        })
+        .on("mouseout", function(d) {
+            d3.select(this).attr("style", "color: black;")
+                .attr("style", "font-family: Courier")
+        });
+}
+
+var size = 200, padding = 20;
+var xMatrixScale = d3.scale.linear().range([padding / 2, size - padding / 2]);
+var yMatrixScale = d3.scale.linear().range([size - padding / 2, padding / 2]);
+var xMatrixAxis = d3.svg.axis().scale(xMatrixScale).orient("bottom").ticks(6).tickSize(size * 3);
+var yMatrixAxis = d3.svg.axis().scale(yMatrixScale).orient("left").ticks(6).tickSize(-size * 3);
+var top3KMeanFeatures = [], top3RandFeatures = [];
+var colorMatrix = d3.scale.category10();
+
+var brush = d3.svg.brush().x(xMatrixScale).y(yMatrixScale)
+    .on("brushstart", brushstart)
+    .on("brush", brushmove)
+    .on("brushend", brushend);
+
+var brushstart = function(p) {
+    if (brushCell !== this) {
+        d3.select(brushCell).call(brush.clear());
+        x.domain(domainByTrait[p.x]);
+        y.domain(domainByTrait[p.y]);
+        brushCell = this;
+    }
+}
+
+var brushmove = function(p) {
+    var e = brush.extent();
+    svg.selectAll("circle").classed("hidden", function(d) {
+        return e[0][0] > d[p.x] || d[p.x] > e[1][0]
+          || e[0][1] > d[p.y] || d[p.y] > e[1][1];
+    });
+}
+
+var brushend = function() {
+    if (brush.empty()) svg.selectAll(".hidden").classed("hidden", false);
+}
+
+var cross = function(a, b) {
+    var c = [], n = a.length, m = b.length, i, j;
+    for (i = -1; ++i < n;) for (j = -1; ++j < m;) 
+        c.push({x: a[i], i: i, y: b[j], j: j});
+    return c;
+}
+
+var svgKMeanPCA = d3.select("body")
+    .append("svg")
+    .attr("width", width + margin.left + margin.right)
+    .attr("height", height + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+var svgRandPCA = d3.select("body")
+    .append("svg")
+    .attr("width", width + margin.left + margin.right)
+    .attr("height", height + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+var KMeanTable = d3.select("body").append("div").style("float","left").style('padding','10px')
+    .append("text").text("Top-3 highest PCA loadings (K-Mean)").style("font-size","12px")
+    .append("table")
+    .attr("style", "outline: thin solid black;")
+    .style("fill", "#999");
+
+var svgKMeanScreePlot = d3.select("body").append("div").style("float","left").style('padding-top','10px')
+    .append("svg")
+    .attr("width", width * 0.58 + margin.left + margin.right)
+    .attr("height", 0.58 * height + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+var RandTable = d3.select("body").append("div").style("float","left").style('padding', '10px')
+    .append("text").text("Top-3 highest PCA loadings (Random)").style("font-size","12px")
+    .append("table")
+    .attr("style", "outline: thin solid black;")
+    .style("fill", "#999");
+
+var svgRandScreePlot = d3.select("body").append("div").style("float","left").style('padding-top','10px')
+    .append("svg")
+    .attr("width", width * 0.58 + margin.left + margin.right)
+    .attr("height", 0.58 * height + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+var svgKMeanMDSEuc = d3.select("body")
+    .append("svg")
+    .attr("width", width + margin.left + margin.right)
+    .attr("height", height + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+var svgRandMDSEuc = d3.select("body")
+    .append("svg")
+    .attr("width", width + margin.left + margin.right)
+    .attr("height", height + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+var svgKMeanMDSCorr = d3.select("body")
+    .append("svg")
+    .attr("width", width + margin.left + margin.right)
+    .attr("height", height + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+var svgRandMDSCorr = d3.select("body")
+    .append("svg")
+    .attr("width", width + margin.left + margin.right)
+    .attr("height", height + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+var svgKMeanPlotMatrix = d3.select("body")
+    .append("svg")
+    .attr("width", (size * 3 + padding))
+    .attr("height", (size * 3 + padding))
+    .append("g")
+    .attr("transform", "translate(" + padding + "," + padding / 2 + ")");
+
+var svgRandPlotMatrix = d3.select("body")
+    .append("svg")
+    .attr("width", size * 3 + padding)
+    .attr("height", size * 3 + padding)
+    .append("g")
+    .attr("transform", "translate(" + padding + "," + padding / 2 + ")");
+
+
+d3.csv("KMean_PCA_dengue_intrinsic_dimensionality.csv", function(error, data) {
+
+    data.forEach(function(d) {
+        d.PC1 = Math.round(+d.PC1 * 10000) / 10000;
+        d.PC2 = Math.round(+d.PC2 * 10000) / 10000;
+        d.PC3 = Math.round(+d.PC3 * 10000) / 10000;
+    });
+
+    var eigenValue = [], features = [], PC1values = [], sortedPC1values = [];
+
+    for (var i = 0; i < data.length; i++) {
+        eigenValue.push(+data[i].ev);
+        features.push(data[i].feature);
+        PC1values.push(+data[i].PC1);
+        sortedPC1values.push(+data[i].PC1);
+    }
+    sortedPC1values.sort(function(a, b){return b-a}).slice(0,3);
+    for (var i = 0; i < 3; i++) {
+        top3KMeanFeatures[i] = features[PC1values.indexOf(sortedPC1values[i])];
+    }
+    console.log(top3KMeanFeatures);
+
+    screeX.domain([1, data.length]);
+    screeY.domain([1e-6, 1]);
+
+    var xScreeAxis = d3.svg.axis().scale(screeX).tickSize(-0.58 * height).tickSubdivide(true);
+    svgKMeanScreePlot.append("g")
+        .attr("class", "x axis")
+        .attr("transform", "translate(0," + 0.58 * height + ")")
+        .call(xScreeAxis);
+
+    var yScreeAxis = d3.svg.axis().scale(screeY).ticks(4).orient("left");
+    svgKMeanScreePlot.append("g")
+          .attr("class", "y axis")
+          .attr("transform", "translate(-10,0)")
+          .call(yScreeAxis);
+
+    svgKMeanScreePlot.append("path")
+        .attr("d", line(eigenValue))
+        .style("stroke", "#456")
+        .style("stroke-width", 1.5)
+        .style("fill", "none");
+
+    var KMeanScreeTooltip = d3.select("body").append("div").attr("class", "tooltipScree");
+
+    svgKMeanScreePlot.selectAll(".point")
+        .data(eigenValue)
+        .enter()
+        .append("circle")
+        .attr("class", "point")
+        .attr("r", 4)
+        .attr("cx", function(d,i) { return screeX(i+1); })
+        .attr("cy", function(d) { return screeY(d); })
+        .style("stroke", "#456")
+        .style("stroke-width", 1.5)
+        .style("fill", "steelblue")
+        .on("mouseover", function(d,i) {
+            KMeanScreeTooltip.transition().duration(200).style("opacity", .9);
+            KMeanScreeTooltip.html("PC" + (i+1) + ": " + Math.round(d*1000000)/10000 + "%")
+                 .style("left", (d3.event.pageX + 5) + "px")
+                 .style("top", (d3.event.pageY - 35) + "px");
+        })
+        .on("mouseout", function(d) {
+            KMeanScreeTooltip.transition().duration(500).style("opacity", 0);
+        });
+        
+
+    svgKMeanScreePlot.append("text")
+        .text("Scree Plot (K-Mean Clustering)")
+        .style("font-size","14px");
+
+    tabulate(data, ["feature", "PC1", "PC2", "PC3"], KMeanTable);
+
+});
+
+d3.csv("Random_PCA_dengue_intrinsic_dimensionality.csv", function(error, data) {
+
+    var eigenValue = [];
+    for (var i = 0; i < data.length; i++) {
+        eigenValue.push(+data[i].ev);
+    }
+
+    data.forEach(function(d) {  
+        d.PC1 = Math.round(+d.PC1 * 10000) / 10000;
+        d.PC2 = Math.round(+d.PC2 * 10000) / 10000;
+        d.PC3 = Math.round(+d.PC3 * 10000) / 10000;    
+    });
+
+    screeX.domain([1, data.length]);
+    screeY.domain([1e-6, 1]);
+
+    var xScreeAxis = d3.svg.axis().scale(screeX).tickSize(-0.58 * height).tickSubdivide(true);
+    svgRandScreePlot.append("g")
+        .attr("class", "x axis")
+        .attr("transform", "translate(0," + 0.58 * height + ")")
+        .call(xScreeAxis);
+
+    var yScreeAxis = d3.svg.axis().scale(screeY).ticks(4).orient("left");
+    svgRandScreePlot.append("g")
+          .attr("class", "y axis")
+          .attr("transform", "translate(-10,0)")
+          .call(yScreeAxis);
+
+    svgRandScreePlot.append("path")
+        .attr("d", line(eigenValue))
+        .style("stroke", "#456")
+        .style("stroke-width", 1.5)
+        .style("fill", "none");
+
+    var RandScreeTooltip = d3.select("body").append("div").attr("class", "tooltipScree");
+
+    svgRandScreePlot.selectAll(".point")
+        .data(eigenValue)
+        .enter()
+        .append("circle")
+        .attr("class", "point")
+        .attr("r", 4)
+        .attr("cx", function(d,i) { return screeX(i+1); })
+        .attr("cy", function(d) { return screeY(d); })
+        .style("stroke", "#456")
+        .style("stroke-width", 1.5)
+        .style("fill", "steelblue")
+        .on("mouseover", function(d,i) {
+            RandScreeTooltip.transition().duration(200).style("opacity", .9);
+            RandScreeTooltip.html("PC" + (i+1) + ": " + Math.round(d*1000000)/10000 + "%")
+                 .style("left", (d3.event.pageX + 5) + "px")
+                 .style("top", (d3.event.pageY - 35) + "px");
+        })
+        .on("mouseout", function(d) {
+            RandScreeTooltip.transition().duration(500).style("opacity", 0);
+        });
+
+    svgRandScreePlot.append("text")
+        .text("Scree Plot (Random Sampling)")
+        .style("font-size","14px");
+
+    tabulate(data, ["feature", "PC1", "PC2", "PC3"], RandTable);
+
+});
+
+// load data KMean output
+d3.csv("KMean_PCA_dengue.csv", function(error, data) {
+
+    // change string into number format
+    for (var i = 0; i < data.length; i++) {
+        for (var key in data[i]) {
+            data[i][key] = +data[i][key];
+        }
+    }
+
+    // Get data for scatter matrix plot
+    var domainByTrait = {};
+    var top3FeatureData = [];
+    var column = [];
+    for(var i = 0; i < data.length; i++){
+        column[i] = [];
+        var obj = {};
+        for (var j in top3KMeanFeatures){
+            column[i][j] = data[i][top3KMeanFeatures[j]];
+            obj[top3KMeanFeatures[j]] = data[i][top3KMeanFeatures[j]];
+        }
+        top3FeatureData.push(obj);
+    }
+    console.log(column);
+    var newColumn = column[0].map(function(col, i) { 
+        return column.map(function(row) { 
+            return row[i] 
+        })
+    });
+    console.log(newColumn);
+    for (var i in top3KMeanFeatures){
+        domainByTrait[top3KMeanFeatures[i]] = d3.extent(newColumn[i]);
+    }
+    console.log(domainByTrait);
+
+
+    // Scale the range of input data
+    xScale.domain([d3.min(data, xValue) * 1.05, d3.max(data, xValue)* 1.05]);
+    yScale.domain([d3.min(data, yValue) * 1.05, d3.max(data, yValue)* 1.05]);
+
+    // x-axis
+    svgKMeanPCA.append("g")
+        .attr("class", "axis")
+        .attr("transform", "translate(0," + (height * 1.01) + ")")
+        .call(xAxis)
+        .append("text")
+        .attr("class", "label")
+        .attr("x", width)
+        .attr("y", -10)
+        .style("text-anchor", "end")
+        .text("PC1");
+
+    // y-axis
+    svgKMeanPCA.append("g")
+        .attr("class", "axis")
+        .call(yAxis)
+        .append("text")
+        .attr("class", "label")
+        .attr("transform", "rotate(-90)")
+        .attr("y", 10)
+        .attr("dy", "0.7em")
+        .style("text-anchor", "end")
+        .text("PC2");
+
+    // Add tooltip
+    var svgKMeanTooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+    // draw points
+    svgKMeanPCA.selectAll(".point")
+        .data(data)
+        .enter()
+        .append("circle")
+        .attr("class", "point")
+        .attr("r", 3)
+        .attr("cx", function(d) { return xScale(xValue(d)); })
+        .attr("cy", function(d) { return yScale(yValue(d)); })
+        .style("stroke", "#333")
+        .style("fill", function(d) { return color(cValue(d));}) 
+        .on("mouseover", function(d) {
+            svgKMeanTooltip.transition().duration(200).style("opacity", .9);
+            svgKMeanTooltip.html("(" + (Math.floor(xValue(d) * 10000) / 10000) + "," + 
+                (Math.floor(yValue(d) * 10000) / 10000) + 
+                ") <br/> humid: " + (Math.floor(d.humid * 100) / 100) + 
+                "<br/> temperature: " + (Math.floor(d.temp * 100) / 100) + "&#8451" + 
+                "<br/> Tree coverage: " + (Math.floor(d.trees * 100) / 100) + "%" + 
+                "<br/> longitude: " + (Math.floor(d.Xmin * 10000) / 10000) + " ~ " +
+                (Math.floor(d.Xmax * 10000) / 10000) + "<br/> longitude: " + 
+                (Math.floor(d.Ymin * 10000) / 10000) + " ~ " + (Math.floor(d.Ymax * 10000) / 10000))
+                .style("left", (d3.event.pageX + 5) + "px")
+                .style("top", (d3.event.pageY - 30) + "px");
+
+        })
+        .on("mouseout", function(d) {
+            svgKMeanTooltip.transition().duration(500).style("opacity", 0);
+        });
+
+
+    // draw legend
+    var legend = svgKMeanPCA.selectAll(".legend")
+        .data(color.domain())
+        .enter()
+        .append("g")
+        .attr("class", "legend")
+        .attr("transform", function(d, i) { return "translate(0," + (i * 20 + 10) + ")"; });
+
+    svgKMeanPCA.append("text")
+        .attr("class", "legend")
+        .attr("style", "font: bold 16px Courier; text-anchor: end;")
+        .text("Principle Component Analysis (PCA): K-Mean Clustering")
+        .attr("transform", "translate(" + width + ",0)");
+
+    // draw legend colored rectangles
+    legend.append("rect")
+        .attr("x", width - 20)
+        .attr("y", 0)
+        .attr("width", 16)
+        .attr("height", 16)
+        .attr("style", "outline: thin solid black;")
+        .style("fill", color);
+
+    // draw legend text
+    legend.append("text")
+        .attr("x", width - 24)
+        .attr("y", 9)
+        .attr("dy", ".4em")
+        .style("text-anchor", "end")
+        .style("font-size","12px")
+        .text(function(d) { return "group " + d;})
+
+    // Scatter matrix plot
+
+    svgKMeanPlotMatrix.append("text")
+        .attr("class", "legend")
+        .attr("style", "font: bold 16px Courier; text-anchor: end;")
+        .text("Top-3 PCA loadings: K-Mean Clustering")
+        .attr("transform", "translate(" + width + ",0)");
+
+    svgKMeanPlotMatrix.selectAll(".x.matrixaxis")
+        .data(top3KMeanFeatures).enter().append("g")
+        .attr("class", "x matrixaxis")
+        .attr("transform", function(d, i) { return "translate(" + (3 - i - 1) * size + ",0)"; })
+        .each(function(d) {
+            xMatrixScale.domain(domainByTrait[d]); 
+            d3.select(this).call(xMatrixAxis); 
+        });
+
+    svgKMeanPlotMatrix.selectAll(".y.matrixaxis")
+        .data(top3KMeanFeatures).enter().append("g")
+        .attr("class", "y matrixaxis")
+        .attr("transform", function(d, i) { return "translate(0," + i * size + ")"; })
+        .each(function(d) {
+            yMatrixScale.domain(domainByTrait[d]); 
+            d3.select(this).call(yMatrixAxis); 
+        });
+
+    var cell = svgKMeanPlotMatrix.selectAll(".cell")
+        .data(cross(top3KMeanFeatures, top3KMeanFeatures))
+        .enter().append("g")
+        .attr("class", "cell")
+        .attr("transform", function(d) {
+            return "translate(" + ((3 - d.i - 1) * size) + "," + (d.j * size) + ")"; 
+        });
+
+    var plot = function(p) {
+
+        var cell = d3.select(this);
+        xMatrixScale.domain(domainByTrait[p.x]);
+        yMatrixScale.domain(domainByTrait[p.y]);
+        
+        cell.append("rect")
+        .attr("class", "frame")
+        .attr("x", padding / 2)
+        .attr("y", padding / 2)
+        .attr("width", size - padding)
+        .attr("height", size - padding);
+
+        cell.selectAll("circle")
+        .data(top3FeatureData)
+        .enter().append("circle")
+        .attr("cx", function(d) { return xMatrixScale(d[p.x]); })
+        .attr("cy", function(d) { return yMatrixScale(d[p.y]); })
+        .attr("r", 2)
+        .style("fill", function(d) { return colorMatrix(p.i * 3 + p.j); });
+    }
+
+    cell.each(plot);
+
+    // Titles for the diagonal.
+    cell.filter(function(d) { return d.i === d.j; }).append("text")
+        .attr("x", padding)
+        .attr("y", padding)
+        .attr("dx", "1.5em")
+        .attr("dy", "1.5em")
+        .attr("style", "font-size:16px;")
+        .text(function(d) { return d.x; });
+
+    cell.call(brush);
+
+
+});
+
+d3.csv("Random_PCA_dengue.csv", function(error, data) {
+
+    data.forEach(function(d) {
+        d.x = +d.x;
+        d.y = +d.y;
+    });
+
+    xScale.domain([d3.min(data, xValue) * 1.05, d3.max(data, xValue)* 1.05]);
+    yScale.domain([d3.min(data, yValue) * 1.05, d3.max(data, yValue)* 1.05]);
+
+    svgRandPCA.append("g")
+        .attr("class", "axis")
+        .attr("transform", "translate(0," + (height * 1.01) + ")")
+        .call(xAxis)
+        .append("text")
+        .attr("class", "label")
+        .attr("x", width)
+        .attr("y", -10)
+        .style("text-anchor", "end")
+        .text("PC1");
+
+    svgRandPCA.append("g")
+        .attr("class", "axis")
+        .call(yAxis)
+        .append("text")
+        .attr("class", "label")
+        .attr("transform", "rotate(-90)")
+        .attr("y", 10)
+        .attr("dy", "0.7em")
+        .style("text-anchor", "end")
+        .text("PC2");
+
+    var svgRandTooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+    svgRandPCA.selectAll(".point")
+        .data(data)
+        .enter()
+        .append("circle")
+        .attr("class", "point")
+        .attr("r", 3)
+        .attr("cx", function(d) { return xScale(xValue(d)); })
+        .attr("cy", function(d) { return yScale(yValue(d)); })
+        .style("stroke", "#333")
+        .style("fill", "#999") 
+        .on("mouseover", function(d) {
+            svgRandTooltip.transition().duration(200).style("opacity", .9);
+            svgRandTooltip.html("(" + (Math.floor(xValue(d) * 10000) / 10000) + "," + 
+                (Math.floor(yValue(d) * 10000) / 10000) + 
+                ") <br/> humid: " + (Math.floor(d.humid * 100) / 100) + 
+                "<br/> temperature: " + (Math.floor(d.temp * 100) / 100) + "&#8451" + 
+                "<br/> Tree coverage: " + (Math.floor(d.trees * 100) / 100) + "%" + 
+                "<br/> longitude: " + (Math.floor(d.Xmin * 10000) / 10000) + " ~ " +
+                (Math.floor(d.Xmax * 10000) / 10000) + "<br/> longitude: " + 
+                (Math.floor(d.Ymin * 10000) / 10000) + " ~ " + (Math.floor(d.Ymax * 10000) / 10000))
+                .style("left", (d3.event.pageX + 5) + "px")
+                .style("top", (d3.event.pageY - 30) + "px");
+        })
+        .on("mouseout", function(d) {
+            svgRandTooltip.transition().duration(500).style("opacity", 0);
+        });
+
+    var legend = svgRandPCA.append("g")
+        .attr("class", "legend")
+        .attr("transform", function(d, i) { return "translate(0," + 10 + ")"; });
+
+    svgRandPCA.append("text")
+        .attr("class", "legend")
+        .attr("style", "font: bold 16px Courier; text-anchor: end;")
+        .text("Principle Component Analysis (PCA): Random Sampling")
+        .attr("transform", "translate(" + width + ",0)");
+
+    legend.append("rect")
+        .attr("x", width - 20)
+        .attr("y", 0)
+        .attr("width", 16)
+        .attr("height", 16)
+        .attr("style", "outline: thin solid black;")
+        .style("fill", "#999");
+
+    legend.append("text")
+        .attr("x", width - 25)
+        .attr("y", 9)
+        .attr("dy", ".4em")
+        .style("text-anchor", "end")
+        .style("font-size","12px")
+});
+
+d3.csv("KMean_MDS_Euc_dengue.csv", function(error, data) {
+
+    data.forEach(function(d) {
+        d.x = +d.x;
+        d.y = +d.y;
+        d.group = +d.group;
+    });
+
+    xScale.domain([d3.min(data, xValue) * 1.05, d3.max(data, xValue)* 1.05]);
+    yScale.domain([d3.min(data, yValue) * 1.05, d3.max(data, yValue)* 1.05]);
+
+    svgKMeanMDSEuc.append("g")
+        .attr("class", "axis")
+        .attr("transform", "translate(0," + (height * 1.01) + ")")
+        .call(xAxis);
+
+    svgKMeanMDSEuc.append("g")
+        .attr("class", "axis")
+        .call(yAxis);
+
+    var KMeanMDSTooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+    svgKMeanMDSEuc.selectAll(".point")
+        .data(data)
+        .enter()
+        .append("circle")
+        .attr("class", "point")
+        .attr("r", 3)
+        .attr("cx", function(d) { return xScale(xValue(d)); })
+        .attr("cy", function(d) { return yScale(yValue(d)); })
+        .style("stroke", "#333")
+        .style("fill", function(d) { return color(cValue(d)); }) 
+        .on("mouseover", function(d) {
+            KMeanMDSTooltip.transition().duration(200).style("opacity", .9);
+            KMeanMDSTooltip.html("(" + (Math.floor(xValue(d) * 10000) / 10000) + "," + 
+                (Math.floor(yValue(d) * 10000) / 10000) + 
+                ") <br/> humid: " + (Math.floor(d.humid * 100) / 100) + 
+                "<br/> temperature: " + (Math.floor(d.temp * 100) / 100) + "&#8451" + 
+                "<br/> Tree coverage: " + (Math.floor(d.trees * 100) / 100) + "%" + 
+                "<br/> longitude: " + (Math.floor(d.Xmin * 10000) / 10000) + " ~ " +
+                (Math.floor(d.Xmax * 10000) / 10000) + "<br/> longitude: " + 
+                (Math.floor(d.Ymin * 10000) / 10000) + " ~ " + (Math.floor(d.Ymax * 10000) / 10000))
+                .style("left", (d3.event.pageX + 5) + "px")
+                .style("top", (d3.event.pageY - 30) + "px");
+        })
+        .on("mouseout", function(d) {
+            KMeanMDSTooltip.transition().duration(500).style("opacity", 0);
+        });
+
+    var legend = svgKMeanMDSEuc.selectAll(".legend")
+        .data(color.domain())
+        .enter()
+        .append("g")
+        .attr("class", "legend")
+        .attr("transform", function(d, i) { return "translate(0," + (i * 20 + 10) + ")"; });
+
+    svgKMeanMDSEuc.append("text")
+        .attr("class", "legend")
+        .attr("style", "font: bold 16px Courier; text-anchor: end;")
+        .text("Multidimensional scaling (MDS): K-Mean Clustering (Euc)")
+        .attr("transform", "translate(" + width + ",0)");
+
+    legend.append("rect")
+        .attr("x", width - 20)
+        .attr("y", 0)
+        .attr("width", 16)
+        .attr("height", 16)
+        .attr("style", "outline: thin solid black;")
+        .style("fill", color);
+
+    legend.append("text")
+        .attr("x", width - 24)
+        .attr("y", 9)
+        .attr("dy", ".4em")
+        .style("text-anchor", "end")
+        .style("font-size","12px")
+        .text(function(d) { return "group " + d;})
+});
+
+d3.csv("Random_MDS_Euc_dengue.csv", function(error, data) {
+
+    data.forEach(function(d) {
+        d.x = +d.x;
+        d.y = +d.y;
+    });
+
+    xScale.domain([d3.min(data, xValue) * 1.05, d3.max(data, xValue)* 1.05]);
+    yScale.domain([d3.min(data, yValue) * 1.05, d3.max(data, yValue)* 1.05]);
+
+    svgRandMDSEuc.append("g")
+        .attr("class", "axis")
+        .attr("transform", "translate(0," + (height * 1.01) + ")")
+        .call(xAxis);
+
+    svgRandMDSEuc.append("g")
+        .attr("class", "axis")
+        .call(yAxis);
+
+    var RandMDSTooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+    svgRandMDSEuc.selectAll(".point")
+        .data(data)
+        .enter()
+        .append("circle")
+        .attr("class", "point")
+        .attr("r", 3)
+        .attr("cx", function(d) { return xScale(xValue(d)); })
+        .attr("cy", function(d) { return yScale(yValue(d)); })
+        .style("stroke", "#333")
+        .style("fill", "#ACE") 
+        .on("mouseover", function(d) {
+            RandMDSTooltip.transition().duration(200).style("opacity", .9);
+            RandMDSTooltip.html("(" + (Math.floor(xValue(d) * 10000) / 10000) + "," + 
+                (Math.floor(yValue(d) * 10000) / 10000) + 
+                ") <br/> humid: " + (Math.floor(d.humid * 100) / 100) + 
+                "<br/> temperature: " + (Math.floor(d.temp * 100) / 100) + "&#8451" + 
+                "<br/> Tree coverage: " + (Math.floor(d.trees * 100) / 100) + "%" + 
+                "<br/> longitude: " + (Math.floor(d.Xmin * 10000) / 10000) + " ~ " +
+                (Math.floor(d.Xmax * 10000) / 10000) + "<br/> longitude: " + 
+                (Math.floor(d.Ymin * 10000) / 10000) + " ~ " + (Math.floor(d.Ymax * 10000) / 10000))
+                .style("left", (d3.event.pageX + 5) + "px")
+                .style("top", (d3.event.pageY - 30) + "px");
+        })
+        .on("mouseout", function(d) {
+            RandMDSTooltip.transition().duration(500).style("opacity", 0);
+        });
+
+    var legend = svgRandMDSEuc.append("g")
+        .attr("class", "legend")
+        .attr("transform", function(d, i) { return "translate(0," + 10 + ")"; });
+
+    svgRandMDSEuc.append("text")
+        .attr("class", "legend")
+        .attr("style", "font: bold 16px Courier; text-anchor: end;")
+        .text("Multidimensional scaling (MDS): Random Sampling (Euc)")
+        .attr("transform", "translate(" + width + ",0)");
+
+    legend.append("rect")
+        .attr("x", width - 20)
+        .attr("y", 0)
+        .attr("width", 16)
+        .attr("height", 16)
+        .attr("style", "outline: thin solid black;")
+        .style("fill", "#ACE");
+
+    legend.append("text")
+        .attr("x", width - 25)
+        .attr("y", 9)
+        .attr("dy", ".4em")
+        .style("text-anchor", "end")
+        .style("font-size","12px")
+});
+
+d3.csv("KMean_MDS_Corr_dengue.csv", function(error, data) {
+
+    data.forEach(function(d) {
+        d.x = +d.x;
+        d.y = +d.y;
+        d.group = +d.group;
+    });
+
+    xScale.domain([d3.min(data, xValue) * 1.05, d3.max(data, xValue)* 1.05]);
+    yScale.domain([d3.min(data, yValue) * 1.05, d3.max(data, yValue)* 1.05]);
+
+    svgKMeanMDSCorr.append("g")
+        .attr("class", "axis")
+        .attr("transform", "translate(0," + (height * 1.01) + ")")
+        .call(xAxis);
+
+    svgKMeanMDSCorr.append("g")
+        .attr("class", "axis")
+        .call(yAxis);
+
+    var KMeanMDSTooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+    svgKMeanMDSCorr.selectAll(".point")
+        .data(data)
+        .enter()
+        .append("circle")
+        .attr("class", "point")
+        .attr("r", 3)
+        .attr("cx", function(d) { return xScale(xValue(d)); })
+        .attr("cy", function(d) { return yScale(yValue(d)); })
+        .style("stroke", "#333")
+        .style("fill", function(d) { return color(cValue(d)); }) 
+        .on("mouseover", function(d) {
+            KMeanMDSTooltip.transition().duration(200).style("opacity", .9);
+            KMeanMDSTooltip.html("(" + (Math.floor(xValue(d) * 10000) / 10000) + "," + 
+                (Math.floor(yValue(d) * 10000) / 10000) + 
+                ") <br/> humid: " + (Math.floor(d.humid * 100) / 100) + 
+                "<br/> temperature: " + (Math.floor(d.temp * 100) / 100) + "&#8451" + 
+                "<br/> Tree coverage: " + (Math.floor(d.trees * 100) / 100) + "%" + 
+                "<br/> longitude: " + (Math.floor(d.Xmin * 10000) / 10000) + " ~ " +
+                (Math.floor(d.Xmax * 10000) / 10000) + "<br/> longitude: " + 
+                (Math.floor(d.Ymin * 10000) / 10000) + " ~ " + (Math.floor(d.Ymax * 10000) / 10000))
+                .style("left", (d3.event.pageX + 5) + "px")
+                .style("top", (d3.event.pageY - 30) + "px");
+        })
+        .on("mouseout", function(d) {
+            KMeanMDSTooltip.transition().duration(500).style("opacity", 0);
+        });
+
+    var legend = svgKMeanMDSCorr.selectAll(".legend")
+        .data(color.domain())
+        .enter()
+        .append("g")
+        .attr("class", "legend")
+        .attr("transform", function(d, i) { return "translate(0," + (i * 20 + 10) + ")"; });
+
+    svgKMeanMDSCorr.append("text")
+        .attr("class", "legend")
+        .attr("style", "font: bold 16px Courier; text-anchor: end;")
+        .text("Multidimensional scaling (MDS): K-Mean Clustering (Corr)")
+        .attr("transform", "translate(" + width + ",0)");
+
+    legend.append("rect")
+        .attr("x", width - 20)
+        .attr("y", 0)
+        .attr("width", 16)
+        .attr("height", 16)
+        .attr("style", "outline: thin solid black;")
+        .style("fill", color);
+
+    legend.append("text")
+        .attr("x", width - 24)
+        .attr("y", 9)
+        .attr("dy", ".4em")
+        .style("text-anchor", "end")
+        .style("font-size","12px")
+        .text(function(d) { return "group " + d;})
+});
+
+d3.csv("Random_MDS_Corr_dengue.csv", function(error, data) {
+
+    data.forEach(function(d) {
+        d.x = +d.x;
+        d.y = +d.y;
+    });
+
+    xScale.domain([d3.min(data, xValue) * 1.05, d3.max(data, xValue)* 1.05]);
+    yScale.domain([d3.min(data, yValue) * 1.05, d3.max(data, yValue)* 1.05]);
+
+    svgRandMDSCorr.append("g")
+        .attr("class", "axis")
+        .attr("transform", "translate(0," + (height * 1.01) + ")")
+        .call(xAxis);
+
+    svgRandMDSCorr.append("g")
+        .attr("class", "axis")
+        .call(yAxis);
+
+    var RandMDSTooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+    svgRandMDSCorr.selectAll(".point")
+        .data(data)
+        .enter()
+        .append("circle")
+        .attr("class", "point")
+        .attr("r", 3)
+        .attr("cx", function(d) { return xScale(xValue(d)); })
+        .attr("cy", function(d) { return yScale(yValue(d)); })
+        .style("stroke", "#333")
+        .style("fill", "#ACE") 
+        .on("mouseover", function(d) {
+            RandMDSTooltip.transition().duration(200).style("opacity", .9);
+            RandMDSTooltip.html("(" + (Math.floor(xValue(d) * 10000) / 10000) + "," + 
+                (Math.floor(yValue(d) * 10000) / 10000) + 
+                ") <br/> humid: " + (Math.floor(d.humid * 100) / 100) + 
+                "<br/> temperature: " + (Math.floor(d.temp * 100) / 100) + "&#8451" + 
+                "<br/> Tree coverage: " + (Math.floor(d.trees * 100) / 100) + "%" + 
+                "<br/> longitude: " + (Math.floor(d.Xmin * 10000) / 10000) + " ~ " +
+                (Math.floor(d.Xmax * 10000) / 10000) + "<br/> longitude: " + 
+                (Math.floor(d.Ymin * 10000) / 10000) + " ~ " + (Math.floor(d.Ymax * 10000) / 10000))
+                .style("left", (d3.event.pageX + 5) + "px")
+                .style("top", (d3.event.pageY - 30) + "px");
+        })
+        .on("mouseout", function(d) {
+            RandMDSTooltip.transition().duration(500).style("opacity", 0);
+        });
+
+    var legend = svgRandMDSCorr.append("g")
+        .attr("class", "legend")
+        .attr("transform", function(d, i) { return "translate(0," + 10 + ")"; });
+
+    svgRandMDSCorr.append("text")
+        .attr("class", "legend")
+        .attr("style", "font: bold 16px Courier; text-anchor: end;")
+        .text("Multidimensional scaling (MDS): Random Sampling (Corr)")
+        .attr("transform", "translate(" + width + ",0)");
+
+    legend.append("rect")
+        .attr("x", width - 20)
+        .attr("y", 0)
+        .attr("width", 16)
+        .attr("height", 16)
+        .attr("style", "outline: thin solid black;")
+        .style("fill", "#ACE");
+
+    legend.append("text")
+        .attr("x", width - 25)
+        .attr("y", 9)
+        .attr("dy", ".4em")
+        .style("text-anchor", "end")
+        .style("font-size","12px")
+});
+
+</script>
+</body>
+</html>
