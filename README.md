@@ -1,1 +1,1 @@
-This is the second mini-project for the course CSE 564 - Visualization.
+link: https://motolee.github.io/Visualization_HW2/
