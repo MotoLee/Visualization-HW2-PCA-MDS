@@ -1,1 +1,1 @@
-link: https://motolee.github.io/Visualization_HW2/
+link:https://motolee.github.io/Visualization-HW2-PCA-MDS/
